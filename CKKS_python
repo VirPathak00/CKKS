@@ -1,0 +1,415 @@
+#Define the CKKS Parameters. We take M to be 8, so N = phi(M) = 4.
+from math import sqrt, e, pi  
+from random import randint
+import numpy as np
+from numpy import conj, polyadd, polydiv, polymul, real, polyval
+#from sympy import *
+
+
+#params = [8, 4, 2, 10] #numbers for M, N, h, P respectively
+#q_0 = 5, q_1 = 4x5 = 20, q_2 = 80, q_3 = 320, q_4 = 1280, q_5 = 5120    
+
+
+def encode(msg, scale_factor):
+    #begin by computing pi inverse
+    scaled_pi_inv = [scale_factor*msg[0], scale_factor*msg[1], scale_factor*conj(msg[1]), scale_factor*conj(msg[0])]
+    #the betas are the Z basis for sigma(R). 
+    beta_1 = [1, 1, 1, 1]
+    beta_2 = [sqrt(2)/2 + 1j*sqrt(2)/2, -sqrt(2)/2 + 1j*sqrt(2)/2, sqrt(2)/2 - 1j*sqrt(2)/2, -sqrt(2)/2 - 1j*sqrt(2)/2]
+    beta_3 = [1j, -1j, -1j, 1j]
+    beta_4 = [-sqrt(2)/2 + 1j*sqrt(2)/2, sqrt(2)/2 + 1j*sqrt(2)/2, -sqrt(2)/2 - 1j*sqrt(2)/2, sqrt(2)/2 - 1j*sqrt(2)/2]
+
+    betas = [beta_1, beta_2, beta_3, beta_4]
+
+    #Here we compute the integer scalars {z_1,...,z_4} to approximate the scaled_pi_inv vector with the basis {beta_1,...,beta_4}
+    # Recall that z_i is computed as taking the Hermitian inner product of scaled_pi_inverse with Beta_i and then dividing it by
+    # the euclidean norm of beta_i
+    # Here the euclidean norm of all beta_i is simply 4, this is an easy calculation
+
+    z_1 = 0
+    for i in range(len(beta_1)):
+        z_1 = z_1 + scaled_pi_inv[i]*conj(beta_1[i])
+    z_1 = z_1/4
+
+    z_2 = 0
+    for i in range(len(beta_2)):
+        z_2 = z_2 + scaled_pi_inv[i]*conj(beta_2[i])
+    z_2 = z_2/4
+
+    z_3 = 0
+    for i in range(len(beta_3)):
+        z_3 = z_3 + scaled_pi_inv[i]*conj(beta_3[i])
+    z_3 = z_3/4
+
+    z_4 = 0
+    for i in range(len(beta_4)):
+        z_4 = z_4 + scaled_pi_inv[i]*conj(beta_4[i])
+    z_4 = z_4/4
+
+    z_vector = [z_1, z_2, z_3, z_4]
+
+    #The z_vector is almost what we want. Since {Beta_1,...,Beta_4} is a Z basis for sigma(R), we need {z_1,...,z_4}
+    #to be integers to ensure z_1*beta_1 + z_2*beta_2+z_3*beta_3 + z_4*beta_4 is in sigma(R). To ensure this, you're supposed
+    #to use coordinate wise random rounding, but I just rounded the z_i's to the nearest integer.
+
+    for i in range(len(z_vector)):
+        z_vector[i] = round(z_vector[i])
+    #Now we compute our approximation which is stored in the projection vector. 
+    #Recall this is z_1*beta_1 + z_2*beta_2+z_3*beta_3 + z_4*beta_4
+    proj_0 = 0
+    proj_1 = 0
+    proj_2 = 0
+    proj_3 = 0
+
+    #There are 4 entries in the projection vector. each for loop here computes an entry in the projection vector
+
+    for i in range(len(betas)):
+        proj_0 = proj_0 + z_vector[i]*betas[i][0] 
+    
+    for i in range(len(betas)):
+        proj_1 = proj_1 + z_vector[i]*betas[i][1]
+    
+    for i in range(len(betas)):
+        proj_2 = proj_2 + z_vector[i]*betas[i][2]
+    
+    for i in range(len(betas)):
+        proj_3 = proj_3 + z_vector[i]*betas[i][3]
+
+    #Now we create the projection vector and store our entries in them. Since {Beta_1,...,Beta_4} is a Z basis for sigma(R),
+    #we know that z_1*beta_1+...+z_4*beta_4 is an element of sigma(R). Therefore, we can compute 
+    #sigma^{-1}(z_1*beta_1+...+z_4*beta_4).
+    
+    projection = np.array([[proj_0], [proj_1], [proj_2], [proj_3]])
+
+    #Since the projection vector is in sigma(R), we can now obtain the coefficients for the polynomial encoding the message
+    # by solving the linear system Ax = b where A is the Vandermonde matrix, x is our polynomial coefficient vector, and b is our
+    # projection vector 
+
+
+    zeta = e**(2 * pi * 1j/8)
+    vandermonde_matrix = np.array([[1, zeta, zeta**2, zeta**3], [1, zeta**3, zeta**6, zeta**9], [1, zeta**5, zeta**10, zeta**15], [1, zeta**7, zeta**14, zeta**21]])
+ 
+
+    coeffs = np.linalg.solve(vandermonde_matrix, projection)
+
+    #We now have the coefficients. These are integers, but because of rounding errors and floating point arithmetic,
+    #python attaches a small imaginary part to them. We simply remove this imaginary part. Python also adds a little error to the real part, so we round each coefficient
+    #to the nearest integer
+
+    for i in range(len(coeffs)):
+        coeffs[i] = real(coeffs[i])
+    
+    
+    
+    #Our coefficients are recovered, but they're in the reverse order. For example, the coefficient for the x^3 term is the last entry and
+    # the constant term is the first entry. We want to reverse this so we can use np.poly1d to turn our coefficient vector into the
+    # final encoded polynomial.
+    get_coeffs = [0, 0, 0, 0]
+    for i in range(len(coeffs)):
+        get_coeffs[i] = round(coeffs[i][0])
+    get_coeffs.reverse()
+
+    poly = np.poly1d(get_coeffs)
+    return poly
+
+def decode(encoding, scale):
+    
+    zeta = e**(2 * pi * 1j/8)
+    zeta_3 = zeta**3
+    zeta_5 = zeta**5
+    zeta_7 = zeta**7
+
+    #For decoding, we just compute sigma(p), where p is the polynomial encoding our original message.
+    #This amounts to evaluating the polynomial p at the 4 8th primitive roots of unity and storing these evaluations in a vector with 4 entries.
+
+    scaled_decoded = [polyval(encoding, zeta), polyval(encoding, zeta_3), polyval(encoding, zeta_5), polyval(encoding, zeta_7)]
+    
+    #Then we divide the vector by our scaling factor.
+    decoded = [0, 0, 0, 0]
+    for i in range(len(decoded)):
+        decoded[i] = (scale**(-1))*scaled_decoded[i]
+        decoded[i] = round(decoded[i])
+    
+    #Finally, we just take the first two entries since the other two will be conjugates of the first two entries.
+    return [decoded[0], decoded[1]]
+
+    
+def secret_key_gen():
+
+    #The first entry in the Secret key sk is 1.
+    sk = [1, 0]
+
+    #The second is a polynomial s with small coefficients.
+    #To keep things simple, we randomly choose these small coefficients for s.
+    s = [0, 0, 0, 0]
+    for i in range(len(s)):
+        s[i] = randint(-1, 1)
+    poly_s = np.poly1d(s)
+    s = poly_s
+    sk[1] = s
+    
+    return sk
+
+
+def public_key_gen(q_L, sk):
+
+    
+    #We first generate the R-polynomial a. I chose the coefficients of a to be in (-q_L/4, q_L/4) but its not necessary
+    
+    a = [0, 0, 0, 0]
+
+    for i in range(len(a)):
+        a[i] = randint(-q_L/4, q_L/4)
+
+    poly_a = np.poly1d(a)
+
+    #Now we compute a*s, where s is the 2nd entry polynomial of secret key sk. After the multiplication, we need
+    #to reduce each coefficient mod q_L.
+    a_times_s = polymul(poly_a, sk[1])
+    for i in range(len(a_times_s)):
+        a_times_s[i] = a_times_s[i] % q_L
+
+
+    #We reduce a*s mod the polynomial x^4 + 1 so that we get a polynomial in the quotient ring R_q.
+    #Next we just multiply a*s by -1 to get -a*s
+    reduce_mod_R = polydiv(a_times_s, [1, 0, 0, 0, 1])
+
+    neg_a_times_s = polymul(-1, reduce_mod_R[1])
+    
+    #Now we generate the error polynomial e. We make it such that it has small coefficients.
+    e = [0, 0, 0, 0]
+    for i in range(len(e)):
+        e[i] = randint(0, 2)
+    
+    poly_e = np.poly1d(e)
+    for i in range(len(poly_e)):
+        poly_e[i] = poly_e[i]%q_L
+    
+    #To be on the safe side and ensure e is a polynomial in R_q, we reduce e mod x^4 + 1
+    e_reduced = polydiv(poly_e, [1, 0, 0, 0, 1])
+    
+    #Now we just compute -as + e. Then we reduce the coefficients of our resultant polynomial mod q_L and then reduce mod 
+    #x^4 + 1.
+    result = polyadd(neg_a_times_s, e_reduced[1])
+
+    for i in range(len(result)):
+        result[i] = result[i]%q_L
+
+    result_reduced = polydiv(result, [1, 0, 0, 0, 1])
+
+    return [result_reduced[1], poly_a] 
+
+def eval_key_gen(P, q_L, sk):
+    a_prime = [0,0,0,0]
+    for i in range(4):
+        a_prime[i] = randint(-P*q_L/4, P*q_L/4)
+    poly_a_prime = np.poly1d(a_prime)
+
+    a_prime_times_s = polymul(poly_a_prime, sk[1])
+    a_prime_times_s = polydiv(a_prime_times_s, np.poly1d([1,0,0,0,1]))[1]
+    
+    for i in range(4):
+        a_prime_times_s[i] = a_prime_times_s[i].real % (P*q_L)
+    
+    e_prime = [0,0,0,0]
+    for i in range(4):
+        e_prime[i] = randint(0,2)
+    poly_e_prime = np.poly1d(e_prime)
+
+    add_polynoms = polyadd(polymul(-1, a_prime_times_s), poly_e_prime)
+
+    P_s_squared = polydiv(polymul(sk[1], sk[1]), np.poly1d([1,0,0,0,1]))[1]
+    
+    for i in range(4):
+        P_s_squared[i] = P*P_s_squared[i]
+    result = polydiv(polyadd(add_polynoms, P_s_squared),np.poly1d([1,0,0,0,1]))[1]
+
+    for i in range(4):
+        result[i] = result[i].real % (P*q_L) 
+    return [result, poly_a_prime]
+
+
+
+def enc(m, pk, q_L):
+    #We start by generating the polynomial v. It has small coefficients.
+    v = [0, 0, 0, 0]
+    for i in range(4):
+        v[i] = randint(-1, 1)
+    poly_v = np.poly1d(v)
+    #We repeat this process to create small polynomials e_0 and e_1
+    e_0 = [0, 0, 0, 0]
+    for i in range(4):
+        e_0[i] = randint(0, 2)
+    poly_e_0 = np.poly1d(e_0)
+    
+    e_1 = [0, 0, 0, 0]
+    for i in range(4):
+        e_1[i] = randint(0, 2)
+    poly_e_1 = np.poly1d(e_1)
+    
+    #We now compute v*pk. Remember our public key pk is a vector of two 
+    #polynomials in R_q. So we need to multiply v by both of these polynomials
+    v_times_pk = [polymul(poly_v, pk[0]), polymul(poly_v, pk[1])]
+    #Now we need to reduce mod q_L and mod x^4 + 1 as we have been doing before.
+    for i in range(len(v_times_pk[0])):
+        (v_times_pk[0])[i] = (v_times_pk[0])[i]%q_L
+    
+    for i in range(len(v_times_pk[1])):
+        (v_times_pk[1])[i] = (v_times_pk[1])[i]%q_L
+
+    v_times_pk_reduced = [polydiv(v_times_pk[0], [1, 0, 0, 0, 1])[1], polydiv(v_times_pk[1], [1, 0, 0, 0, 1])[1]]
+    
+    #We now compute the vector [m + e_0, e_1]. We reduce mod q_L just to be on the safe side.
+    altered_msg = [polyadd(m, poly_e_0), poly_e_1]
+    for i in range(len(altered_msg[0])):
+       altered_msg[0][i] = altered_msg[0][i].real %q_L
+
+    for i in range(len(altered_msg[1])):
+        altered_msg[1][i] = altered_msg[1][i].real %q_L
+    
+    #Now we compute v_times_pk + altered_msg. Just add the vectors element-wise, and reduce the coefficients mod q_L.
+    result = [polyadd(v_times_pk_reduced[0], altered_msg[0]), polyadd(v_times_pk_reduced[1], altered_msg[1])]
+    
+    #for i in range(len(result[0])):
+    #    (result[0])[i] = (result[0])[i]%q_L
+
+    #Here I am just making sure our coefficients are in the interval (-q_L/2, q_L/2). It's not really necessary.
+    
+    for i in range(len(result[0])):
+        if result[0][i] > q_L/2:
+            result[0][i] = -1*(q_L - result[0][i])
+        elif result[0][i] < -q_L/2:
+            result[0][i] = q_L + result[0][i]
+
+    for i in range(len(result[1])):
+        result[1][i] = result[1][i]%q_L 
+    for i in range(len(result[0])):
+        if result[1][i] > q_L/2:
+            result[1][i] = -1*(q_L - result[1][i])
+        elif result[1][i] < -q_L/2:
+            result[1][i] = q_L + result[1][i]
+
+    #Finally, I reduce mod x^4 + 1
+    result_reduced = [polydiv(result[0], [1, 0, 0, 0, 1])[1], polydiv(result[1], [1, 0, 0, 0, 1])[1]] 
+    return result_reduced
+    
+
+def dec(c, sk, q_L):
+    #decrypting is just computing the dot product between our ciphertext and sk. After computing the dot product, 
+    #We reduce mod q_L and then reduce mod x^4 + 1.
+    result = polyadd(polymul(c[0], sk[0]), (polymul(c[1], sk[1])))
+    
+    result_reduced = polydiv(result, [1, 0, 0, 0, 1])
+
+    for i in range(4):
+        result_reduced[1][i] = result_reduced[1][i].real %q_L
+    return result_reduced[1]
+
+
+
+
+
+def add(c_1, c_2, q_l):
+
+    #This add function assumes the ciphertexts are on the same level
+    #i.e they're encrypted under the same q_l.
+    # Simply add the two ciphertexts and then reduce the coefficients of the
+    # polynomials in the resultant ciphertext mod q_l.      
+    result = [0,0]
+    
+    result[0] = polyadd(c_1[0], c_2[0])
+
+    result[1] = polyadd(c_1[1], c_2[1])
+
+    for i in range(4):
+        (result[0])[i] = result[0][i].real % q_l
+    
+    for i in range(4):
+        result[1][i] = result[1][i].real %q_l
+
+    result_reduced = [polydiv(result[0], [1, 0, 0, 0, 1])[1], polydiv(result[1], [1, 0, 0, 0, 1])[1]] 
+    return result_reduced
+
+
+def mult(c_1, c_2, P, q_l, evk):
+    d_0 = polydiv(polymul(c_1[0], c_2[0]), np.poly1d([1,0,0,0,1]))[1]
+    for i in range(4):
+        d_0[i] = d_0[i].real % q_l
+    
+    d_1 = polydiv(polyadd(polymul(c_1[1], c_2[0]), polymul(c_2[1], c_1[0])), np.poly1d([1,0,0,0,1]))[1]
+    for i in range(4):
+        d_1[i] = d_1[i].real % q_l
+    
+    d_2 = polydiv(polymul(c_1[1], c_2[1]), np.poly1d([1,0,0,0,1]))[1]
+    for i in range(4):
+        d_2[i] = d_2[i].real % q_l
+    
+    
+    prod_one = polydiv(polymul(d_2, evk[0]), np.poly1d([1,0,0,0,1]))[1]
+    prod_two = polydiv(polymul(d_2, evk[1]), np.poly1d([1,0,0,0,1]))[1]
+
+    for i in range(4):
+        prod_one[i] = round((1/P)*prod_one[i].real) % q_l
+        prod_two[i] = round((1/P)*prod_two[i].real) % q_l
+
+    sum_one = polydiv(polyadd(d_0, prod_one), np.poly1d([1,0,0,0,1]))[1]
+    sum_two = polydiv(polyadd(d_1, prod_two), np.poly1d([1,0,0,0,1]))[1]
+
+    for i in range(4):
+        sum_one[i] = sum_one[i].real % q_l
+        sum_two[i] = sum_two[i].real % q_l
+    
+    
+    return [sum_one, sum_two]
+
+
+def modswitch(c, lower_level):
+    for i in range(4):
+        c[0][i] = c[0][i].real % lower_level
+        c[1][i] = c[1][i].real %lower_level
+    
+    return c
+
+
+
+
+
+def rescale(q_l_1, q_l_2, ct):
+
+    #This is the rescaling function. It turns a CT on level 
+    #q_l_1 to a CT on level q_l_2 
+
+    for i in range(4):
+        ct[0][i] = round((q_l_2/q_l_1)*(ct[0][i]))
+    for i in range(4):
+        ct[1][i] = round((q_l_2/q_l_1)*(ct[1][i]))
+    
+    for i in range(4):
+        ct[0][i] = ct[0][i].real % q_l_2
+    
+    for i in range(4):
+        ct[1][i] = ct[1][i].real %q_l_2
+    return ct
+
+def addition_by_constant(pt, ct, q_l):
+    ct_add = [polyadd(ct[0], pt), ct[1]]
+
+    for i in range(4):
+        ct_add[0][i] = ct_add[0][i].real % q_l
+    
+    return ct_add
+
+def mult_by_constant(pt, ct, q_l):
+    ct_mult = [polymul(pt, ct[0]), polymul(pt, ct[1])]
+
+    ct_mult_reduced = [polydiv(ct_mult[0], np.poly1d([1,0,0,0,1]))[1], polydiv(ct_mult[1], np.poly1d([1,0,0,0,1]))[1]]
+
+
+    for i in range(4):
+        ct_mult_reduced[0][i] = ct_mult_reduced[0][i].real % q_l
+        ct_mult_reduced[1][i] = ct_mult_reduced[1][i].real % q_l
+
+  
+
+
+    return ct_mult_reduced 
